@@ -28,7 +28,7 @@ jobs:
 
           # Find 6-digit work item number in PR title
           if ($env:PR_TITLE -match '(?<![0-9])(\d{6})(?![0-9])') {
-            $workItemId = $Matches[1]
+            $workItemId = [int]$Matches[1]
             Write-Host "Found work item ID: $workItemId"
           } else {
             Write-Error "No 6-digit work item ID found in PR title: '$($env:PR_TITLE)'"
