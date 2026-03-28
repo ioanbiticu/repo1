@@ -1,8 +1,67 @@
 name: Org CI
-on: [push]
+on:
+  push:
+  pull_request:
+    types: [opened, edited, synchronize]
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: echo "Hello from org template"
+
+  validate-workitem:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Azure DevOps Work Item in PR Title
+        shell: pwsh
+        env:
+          AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+          AZURE_DEVOPS_BASE_URL: ${{ secrets.AZURE_DEVOPS_BASE_URL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          $AZURE_DEVOPS_BASE_URL = $env:AZURE_DEVOPS_BASE_URL
+
+          # Find 6-digit work item number in PR title
+          if ($env:PR_TITLE -match '(?<![0-9])(\d{6})(?![0-9])') {
+            $workItemId = $Matches[1]
+            Write-Host "Found work item ID: $workItemId"
+          } else {
+            Write-Error "No 6-digit work item ID found in PR title: '$($env:PR_TITLE)'"
+            exit 1
+          }
+
+          $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($env:AZURE_DEVOPS_PAT)"))
+          $headers = @{ Authorization = "Basic $base64Auth" }
+
+          # Validate work item exists
+          try {
+            $workItem = Invoke-RestMethod -Uri "$AZURE_DEVOPS_BASE_URL/_apis/wit/workitems/${workItemId}?api-version=7.0" -Method Get -Headers $headers -ErrorAction Stop
+            Write-Host "Work item $workItemId verified: $($workItem.fields.'System.Title')"
+          } catch {
+            Write-Error "Work item $workItemId not found in Azure DevOps. $_"
+            exit 1
+          }
+
+          # Check if a comment with the PR link already exists
+          $comments = Invoke-RestMethod -Uri "$AZURE_DEVOPS_BASE_URL/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3" -Method Get -Headers $headers -ErrorAction Stop
+          $alreadyLinked = $comments.comments | Where-Object { $_.text -match [regex]::Escape($env:PR_URL) }
+
+          if (-not $alreadyLinked) {
+            $patchHeaders = $headers + @{ "Content-Type" = "application/json-patch+json" }
+            $body = ConvertTo-Json @(
+              @{
+                op    = "add"
+                path  = "/fields/System.History"
+                value = "<a href=`"$($env:PR_URL)`">GitHub PR #$($env:PR_NUMBER)</a>"
+              }
+            )
+            Invoke-RestMethod -Uri "$AZURE_DEVOPS_BASE_URL/_apis/wit/workitems/${workItemId}?api-version=7.0" -Method Patch -Headers $patchHeaders -Body $body -ErrorAction Stop
+            Write-Host "Added PR link to work item $workItemId"
+          } else {
+            Write-Host "PR link already present on work item $workItemId, skipping."
+          }
